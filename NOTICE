@@ -1,0 +1,27 @@
+Magpie Codex Native History
+Copyright (c) 2026 Singrun
+
+The history-normalization approach, including the conversion of recorded
+web-search items into portable text, builds on the MIT-licensed work in:
+
+  @magpie-community/middleware-codex-history v0.1.2
+  https://github.com/magpie-community/plugins/tree/main/packages/codex-history
+
+  magpie-codex-history-filter
+  https://github.com/unisong/magpie-codex-history-filter
+  Source revision recorded by the community package:
+  43e0b5c8d5e1542a4bb58054f1c3c7f6ee0e7120
+
+  Codex Filter Manager
+  https://github.com/unisong/codex-filter-manager
+
+Copyright (c) 2026 Codex Filter Manager contributors
+
+The upstream MIT copyright notice is retained here. The permission terms
+and warranty disclaimer in the accompanying LICENSE apply to this work.
+
+This package supplies a separate magpie.hooks entry for the native Codex
+request route. It does not bundle the upstream middleware, dashboard,
+proxy service, provider configuration, or any local conversation data.
+
+Magpie and Codex are independent projects. This is a community plugin.

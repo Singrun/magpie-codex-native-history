@@ -1,0 +1,47 @@
+{
+  "name": "magpie-codex-native-history",
+  "version": "1.0.0",
+  "description": "A Magpie request hook that preserves readable Codex history when switching back to the native ChatGPT route.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Singrun",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Singrun/magpie-codex-native-history.git"
+  },
+  "homepage": "https://github.com/Singrun/magpie-codex-native-history#readme",
+  "bugs": {
+    "url": "https://github.com/Singrun/magpie-codex-native-history/issues"
+  },
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "magpie-hooks",
+    "codex",
+    "responses",
+    "history"
+  ],
+  "files": [
+    "native-history.hooks.js",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "magpie": {
+    "name": "Codex Native History",
+    "summary": "Keep readable Codex history when returning to the native ChatGPT route.",
+    "hooks": "./native-history.hooks.js",
+    "options": {
+      "gatewayTimeoutMs": 2000
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check native-history.hooks.js && npm test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

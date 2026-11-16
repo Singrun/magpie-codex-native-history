@@ -1,0 +1,111 @@
+# Magpie Codex 原生路由历史兼容插件
+
+[English](README.md)
+
+这是一个无第三方依赖的 [Magpie](https://github.com/yetone/magpie) **请求钩子插件**，用于在已有 Codex 聊天中，从第三方模型切回原生 ChatGPT 路由后继续使用可读历史。
+
+针对的典型错误是：
+
+```text
+invalid_encrypted_content
+The encrypted content for item rs_… could not be verified.
+```
+
+## 为什么使用请求钩子
+
+Magpie 的原生 ChatGPT 登录透传分支调用 `gatewayHooks`，跳过同步 `magpie.middleware` 链。只在同步中间件内过滤历史，覆盖不到这条原生路由。
+
+本插件注册为 **`magpie.hooks`**。原生透传分支会调用它。Magpie 接收 WebSocket 的后续回合时，也会先还原完整历史，再经过相应 HTTP 处理入口，因此该路由上的钩子能够处理还原后的输入。
+
+规范见 Magpie 的[中文插件开发与发布文档](https://usemagpie.ai/docs/zh/plugins)及[请求钩子实现契约](https://github.com/yetone/magpie/blob/main/docs/subsystems/gateway-request-hooks.md)。
+
+## 安装
+
+需要支持 `magpie.hooks` 的 Magpie 版本。原始实现已在 **0.1.4226** 上完成真实链路验证，公开包也在 **0.1.4280** 上检查加载。这些是已验证版本，不代表最低兼容版本。
+
+```sh
+magpie plugin add github:Singrun/magpie-codex-native-history
+```
+
+可选：明确将钩子超时设为两秒：
+
+```sh
+magpie plugin options github:Singrun/magpie-codex-native-history '{"gatewayTimeoutMs":2000}'
+```
+
+`package.json` 中的选项示例供编辑器初始化；实际配置以保存到插件条目的选项为准。
+
+安装后检查插件页是否显示 **async gateway hook / `onRequest`**。仅看到同步中间件条目，不能证明安装正确。
+
+若之前已安装本地版原生历史钩子，先在插件页关闭该条目，再启用本包；保持一份原生历史钩子运行。
+
+本包无需构建、额外端口、供应商凭据或客户端配置改写，由 Magpie 提供 Bun 运行时。
+
+## 处理范围
+
+处理以下请求：
+
+- `/backend-api/codex/responses`：无供应商前缀的模型，或 `codex/` 模型。
+- `/v1/responses`：上述模型，且 Magpie 将客户端识别为 `codex`。
+
+其他供应商前缀的模型原样通过。在共享的 `/v1/responses` 入口上，其他客户端或身份不明的客户端也原样通过。
+
+对符合范围的请求，钩子执行三项处理：
+
+1. 移除旧 `reasoning` 条目。
+2. 将历史 `web_search_call` 转为有明确标记的助手文字，只保留原条目实际包含的数据。
+3. 移除可携带明文的历史项中可选的服务器 `id`。
+
+用户消息、助手回答及其 `phase`、图片、工具参数和结果、`call_id` 配对、业务数据内部 ID、工具声明均保留。模型、工具选择、流式配置及对新加密推理内容的请求保持不变。插件不改写聊天文件或新响应。
+
+即使旧内部推理可被读取，过滤时仍会移除这些推理项，因此后续回合无法复用被移除的持久化推理状态。这是为了可读历史迁移作出的取舍。
+
+## 边界与诊断
+
+插件不能恢复仅存在于加密压缩历史、密封消息内容、`item_reference`、`previous_response_id` 或服务端 `conversation` 引用中的上下文。遇到这些输入时，会保留原请求，报告 `native-history-opaque-context`，由上游决定能否接受；不会静默丢弃这些上下文。
+
+普通 Magpie WebSocket 续接中，网关会先还原完整输入并移除 `previous_response_id`，再调用钩子。直接发送含服务端引用的 HTTP 请求属于另一种情况。
+
+专用 `/responses/compact` 调用和 Magpie 内部请求不在本钩子范围内。按 Magpie 的契约，钩子失败或超时也会回滚，本来的请求可能继续送往上游。
+
+诊断只有固定代码及字节数：
+
+- `native-history-filtered`
+- `native-history-opaque-context`
+
+插件不读取磁盘，不记录、保存或导出请求内容、账号标识和凭据，只处理 Magpie 提供的请求对象与上下文。
+
+## 测试与开发
+
+开发测试使用 Node.js 22 或更新版本。仓库中的测试数据均为合成数据，不需要模型 API 或账号。
+
+```sh
+git clone https://github.com/Singrun/magpie-codex-native-history.git
+cd magpie-codex-native-history
+npm run check
+npm run pack:check
+```
+
+从源码目录加载：
+
+```sh
+magpie plugin add .
+```
+
+单独修改源文件后，需要重新加载插件配置；关闭再开启插件可重载宿主。测试源码版之前，先关闭另一份同类钩子。
+
+原始真实回归使用了包含图片和工具记录的完整历史，共 149 个历史项、约 17.98 MB 输入。关闭钩子可重现同一密文错误，开启后 HTTP 与 WebSocket 均通过；同一个 WebSocket 完成“第三方 → 原生 → 第三方 → 原生”四轮切换，保留了合成的上下文验证标记。
+
+这些结果限定于已验证环境，不代表所有网关、账号、模型及历史格式。真实聊天记录、账号信息、认证读取脚本、本地备份和原始真实回放脚本均不进入公开仓库。
+
+## 停用或卸载
+
+```sh
+magpie plugin off github:Singrun/magpie-codex-native-history
+# 或卸载：
+magpie plugin rm github:Singrun/magpie-codex-native-history
+```
+
+## 许可与致谢
+
+采用 [MIT](LICENSE) 许可。前序历史过滤项目的来源与版权说明见 [NOTICE](NOTICE)。本项目是独立社区插件。
