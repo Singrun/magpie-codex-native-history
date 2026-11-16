@@ -2,14 +2,29 @@
 
 [简体中文](README.zh-CN.md)
 
-A dependency-free [Magpie](https://github.com/yetone/magpie) **request hook** for continuing an existing Codex conversation after switching from a third-party model back to the native ChatGPT route.
+This plugin fixes **an existing Codex chat failing with an encrypted-history error after switching back to a native model through [Magpie](https://github.com/yetone/magpie)**. It normalizes incompatible history sent to the native service while preserving readable messages, images, and tool records, so that conversation can continue.
 
-It handles incompatible reasoning history associated with errors such as:
+## The problem it solves
+
+A typical workflow is:
+
+1. You use a third-party model through Magpie in a Codex chat, accumulating messages, file analysis, and tool calls.
+2. You keep the same chat and select a native Codex model to continue the work.
+3. The next request fails with an encrypted-content verification error. Switching back to a third-party model may let the same chat continue.
+
+The error can look like this:
 
 ```text
 invalid_encrypted_content
 The encrypted content for item rs_… could not be verified.
+Reason: Encrypted content could not be decrypted or parsed.
 ```
+
+Replayed history contains more than the readable messages shown in the chat. It can also contain encrypted reasoning state returned by an earlier model. After an upstream switch, the native service may be unable to verify some of that old encrypted state and reject the entire request.
+
+**The goal is to keep working in the original chat with the context you have already built.** Before a native request is sent, this hook removes incompatible old reasoning items and normalizes related search history and server item IDs. Readable messages, images, tool arguments/results, and tool-call pairing are retained.
+
+Requests must still pass through Magpie and carry readable history. Context available only as encrypted compaction or server-side references cannot be recovered by this hook; see “Boundaries and diagnostics” below.
 
 ## Why a request hook
 
