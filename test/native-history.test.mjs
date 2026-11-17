@@ -65,7 +65,7 @@ test('native ChatGPT history drops foreign reasoning without changing messages o
   assert.equal(result.stream, before.stream);
   assert.equal(result.tool_choice, before.tool_choice);
   assert.deepEqual(body, before);
-  assert.equal(reports.some(({code}) => code === 'native-history-filtered'), true);
+  assert.equal(reports.some(({code}) => code === 'ready'), true);
 });
 
 test('historical native search becomes readable recorded data without its sealed dependency', async () => {
@@ -107,7 +107,7 @@ test('server-only references and sealed message content stay intact and are expl
     const {result, reports} = await run(body);
     assert.equal(result, undefined);
     assert.deepEqual(body, before);
-    assert.equal(reports.some(({code}) => code === 'native-history-opaque-context'), true);
+    assert.equal(reports.some(({code}) => code === 'unavailable'), true);
   }
 });
 
@@ -118,7 +118,7 @@ test('server continuation references are preserved instead of silently losing th
   const {result, reports} = await run(body);
   assert.equal(result, undefined);
   assert.deepEqual(body, before);
-  assert.ok(reports.some(({code}) => code === 'native-history-opaque-context'));
+  assert.ok(reports.some(({code}) => code === 'unavailable'));
 });
 
 test('clean native requests and compaction endpoints pass through', async () => {
@@ -180,7 +180,7 @@ test('onRequest implements the asynchronous request-hook contract', async () => 
 });
 
 test('native compaction does not bypass cleanup of later third-party reasoning', async () => {
-  for (const type of ['compaction', 'context_compaction']) {
+  for (const type of ['compaction', 'context_compaction', 'compaction_summary']) {
     const checkpoint = {
       type,
       id: 'cmp_native_checkpoint',
@@ -199,8 +199,54 @@ test('native compaction does not bypass cleanup of later third-party reasoning',
     assert.deepEqual(result.input.filter(item => item.call_id).map(item => item.call_id),
       before.input.filter(item => item.call_id).map(item => item.call_id));
     assert.deepEqual(body, before);
-    assert.ok(reports.some(({code}) => code === 'native-history-filtered-with-compaction'));
+    assert.ok(reports.some(({code}) => code === 'ready'));
   }
+});
+
+test('the Responses path alias covers Codex and leaves other clients unchanged', async () => {
+  const body = fixture();
+  assert.ok((await run(body, {path: '/responses'})).result);
+  assert.ok((await run(body, {path: '/responses/'})).result);
+  assert.equal((await run(body, {path: '/responses', agent: 'opencode'})).result, undefined);
+  assert.equal((await run(body, {path: '/responses', agent: undefined})).result, undefined);
+});
+
+test('additional portable tool items lose server ids while retaining their relationships', async () => {
+  const body = fixture();
+  const items = [
+    {type: 'computer_call_output', id: 'co_server', call_id: 'computer_pair',
+      output: {type: 'computer_screenshot', image_url: 'data:image/png;base64,c3ludGhldGlj'}},
+    {type: 'shell_call', id: 'sh_server', call_id: 'shell_pair',
+      action: {commands: ['pwd'], timeout_ms: 1000, max_output_length: 100}},
+    {type: 'shell_call_output', id: 'sho_server', call_id: 'shell_pair',
+      output: [{stdout: 'synthetic directory', stderr: '', outcome: {type: 'exit', exit_code: 0}}]},
+    {type: 'apply_patch_call', id: 'ap_server', call_id: 'patch_pair',
+      operation: {type: 'update_file', path: 'a.txt', diff: '+synthetic change'}},
+    {type: 'apply_patch_call_output', id: 'apo_server', call_id: 'patch_pair',
+      status: 'completed', output: 'synthetic patch applied'},
+    {type: 'mcp_approval_response', id: 'apr_server', approval_request_id: 'approval_pair', approve: true},
+  ];
+  body.input.push(...items);
+  const before = structuredClone(body);
+  const {result} = await run(body);
+  for (const item of items) {
+    const expected = {...item};
+    delete expected.id;
+    assert.deepEqual(result.input.find(value => value.type === item.type), expected);
+  }
+  assert.deepEqual(body, before);
+});
+
+test('diagnostics use the host allowlist and byte-count range even for large inputs', async () => {
+  const allowed = new Set(['ready', 'empty', 'unbound', 'unauthorized', 'unavailable', 'invalid', 'skipped']);
+  const body = fixture();
+  body.input[0].content[0].text = 'synthetic large message '.repeat(4000);
+  const {reports} = await run(body);
+  assert.equal(reports.length, 1);
+  assert.ok(allowed.has(reports[0].code), 'Magpie ignores unknown report codes');
+  assert.equal(reports[0].code, 'ready');
+  assert.ok(Number.isSafeInteger(reports[0].bytes));
+  assert.ok(reports[0].bytes >= 0 && reports[0].bytes <= 32768, 'Magpie discards larger byte counts');
 });
 
 test('a native checkpoint without incompatible history passes through unchanged', async () => {
@@ -215,4 +261,39 @@ test('a native checkpoint without incompatible history passes through unchanged'
   const before = structuredClone(body);
   assert.equal((await run(body)).result, undefined);
   assert.deepEqual(body, before);
+});
+
+test('compaction_summary is preserved while subsequent foreign reasoning is removed', async () => {
+  const checkpoint = {type: 'compaction_summary', id: 'cmp_summary', encrypted_content: 'synthetic-checkpoint'};
+  const body = fixture();
+  body.input.unshift(checkpoint);
+  const {result} = await run(body);
+  assert.ok(result, 'compaction_summary must not bypass cleanup of subsequent history');
+  assert.strictEqual(result.input[0], checkpoint);
+  assert.equal(result.input.some(item => item.type === 'reasoning'), false);
+});
+
+test('server conversation references and opaque non-checkpoint items retain the whole request', async () => {
+  for (const changes of [
+    {conversation: 'conv_synthetic'},
+    {conversation: {id: 'conv_synthetic'}},
+    {input: [...fixture().input, {type: 'unknown_sealed_item', encrypted_content: 'synthetic-seal'}]},
+  ]) {
+    const body = {...fixture(), ...changes};
+    const before = structuredClone(body);
+    const {result, reports} = await run(body);
+    assert.equal(result, undefined);
+    assert.deepEqual(body, before);
+    assert.deepEqual(reports, [{code: 'unavailable', bytes: 0}]);
+  }
+});
+
+test('filtering is idempotent and never removes required ids of unknown server tools', async () => {
+  const body = fixture();
+  const serverCall = {type: 'file_search_call', id: 'fs_required', status: 'completed',
+    queries: ['synthetic query'], results: [{file_id: 'file_business', text: 'synthetic record'}]};
+  body.input.push(serverCall);
+  const {result} = await run(body);
+  assert.strictEqual(result.input.at(-1), serverCall);
+  assert.equal((await run(result)).result, undefined);
 });

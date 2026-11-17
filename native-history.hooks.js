@@ -5,15 +5,17 @@ const PORTABLE_ITEMS = new Set([
   'message', 'agent_message', 'function_call', 'function_call_output',
   'custom_tool_call', 'custom_tool_call_output', 'tool_search_call',
   'tool_search_output', 'additional_tools',
+  'computer_call_output', 'shell_call', 'shell_call_output',
+  'apply_patch_call', 'apply_patch_call_output', 'mcp_approval_response',
 ]);
-const COMPACTION_ITEMS = new Set(['compaction', 'context_compaction']);
+const COMPACTION_ITEMS = new Set(['compaction', 'context_compaction', 'compaction_summary']);
 
 function nativeRequest(body, ctx) {
   if (ctx.protocol !== 'responses' || !Array.isArray(body?.input)) return false;
   const path = (ctx.path || '').replace(/\/+$/, '');
-  if (!['/backend-api/codex/responses', '/v1/responses'].includes(path)) return false;
-  // /v1/responses is shared by other clients; require Magpie's Codex identity.
-  if (path === '/v1/responses' && ctx.agent !== 'codex') return false;
+  if (!['/backend-api/codex/responses', '/v1/responses', '/responses'].includes(path)) return false;
+  // Shared Responses endpoints require Magpie's Codex client identity.
+  if (path !== '/backend-api/codex/responses' && ctx.agent !== 'codex') return false;
   const model = body.model;
   return typeof model === 'string' &&
     (!model.includes('/') || model.startsWith('codex/'));
@@ -54,7 +56,7 @@ export async function onRequest(body, ctx) {
   if (body.previous_response_id || body.conversation ||
       body.input.some(requiresContextPassthrough)) {
     // A hook cannot reject. Keep opaque context intact and report the limit.
-    ctx.report?.('native-history-opaque-context', 0);
+    ctx.report?.('unavailable', 0);
     return;
   }
 
@@ -83,9 +85,9 @@ export async function onRequest(body, ctx) {
   }
   if (!changed) return;
   const clean = {...body, input};
-  const code = input.some(item => COMPACTION_ITEMS.has(item?.type))
-    ? 'native-history-filtered-with-compaction'
-    : 'native-history-filtered';
-  ctx.report?.(code, new TextEncoder().encode(JSON.stringify(clean)).byteLength);
+  // Magpie accepts a fixed report allowlist and at most 32 KiB. This hook
+  // adds no external context, so report zero bytes and avoid serializing
+  // a potentially image-heavy request a second time just for diagnostics.
+  ctx.report?.('ready', 0);
   return clean;
 }
