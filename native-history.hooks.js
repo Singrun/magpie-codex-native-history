@@ -6,9 +6,7 @@ const PORTABLE_ITEMS = new Set([
   'custom_tool_call', 'custom_tool_call_output', 'tool_search_call',
   'tool_search_output', 'additional_tools',
 ]);
-const OPAQUE_ITEMS = new Set([
-  'compaction', 'context_compaction', 'item_reference',
-]);
+const COMPACTION_ITEMS = new Set(['compaction', 'context_compaction']);
 
 function nativeRequest(body, ctx) {
   if (ctx.protocol !== 'responses' || !Array.isArray(body?.input)) return false;
@@ -21,9 +19,12 @@ function nativeRequest(body, ctx) {
     (!model.includes('/') || model.startsWith('codex/'));
 }
 
-function opaqueContent(item) {
+function requiresContextPassthrough(item) {
   if (!item || typeof item !== 'object') return false;
-  if (OPAQUE_ITEMS.has(item.type)) return true;
+  // A checkpoint can be readable by the native upstream. Keep it untouched,
+  // but still filter incompatible items accumulated after the checkpoint.
+  if (COMPACTION_ITEMS.has(item.type)) return false;
+  if (item.type === 'item_reference') return true;
   if (item.type !== 'reasoning' && item.encrypted_content) return true;
   return Array.isArray(item.content) &&
     item.content.some(part => part?.type === 'encrypted_content');
@@ -51,7 +52,7 @@ function recordedSearch(item) {
 export async function onRequest(body, ctx) {
   if (!nativeRequest(body, ctx)) return;
   if (body.previous_response_id || body.conversation ||
-      body.input.some(opaqueContent)) {
+      body.input.some(requiresContextPassthrough)) {
     // A hook cannot reject. Keep opaque context intact and report the limit.
     ctx.report?.('native-history-opaque-context', 0);
     return;
@@ -82,6 +83,9 @@ export async function onRequest(body, ctx) {
   }
   if (!changed) return;
   const clean = {...body, input};
-  ctx.report?.('native-history-filtered', new TextEncoder().encode(JSON.stringify(clean)).byteLength);
+  const code = input.some(item => COMPACTION_ITEMS.has(item?.type))
+    ? 'native-history-filtered-with-compaction'
+    : 'native-history-filtered';
+  ctx.report?.(code, new TextEncoder().encode(JSON.stringify(clean)).byteLength);
   return clean;
 }

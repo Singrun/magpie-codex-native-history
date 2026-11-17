@@ -96,10 +96,8 @@ test('codex prefixed native requests through the normal gateway are covered', as
   assert.ok((await run(body, {path: '/v1/responses'})).result);
 });
 
-test('unsupported opaque context stays intact and is explicitly reported', async () => {
+test('server-only references and sealed message content stay intact and are explicitly reported', async () => {
   for (const item of [
-    {type: 'compaction', encrypted_content: 'opaque-context'},
-    {type: 'context_compaction', encrypted_content: 'opaque-context'},
     {type: 'item_reference', id: 'server-only-reference'},
     {type: 'message', role: 'user', content: [{type: 'encrypted_content', encrypted_content: 'sealed-task'}]},
   ]) {
@@ -179,4 +177,42 @@ test('onRequest implements the asynchronous request-hook contract', async () => 
   });
   assert.ok(pending instanceof Promise, 'magpie.hooks onRequest must return a Promise');
   assert.ok(await pending);
+});
+
+test('native compaction does not bypass cleanup of later third-party reasoning', async () => {
+  for (const type of ['compaction', 'context_compaction']) {
+    const checkpoint = {
+      type,
+      id: 'cmp_native_checkpoint',
+      encrypted_content: 'synthetic-native-checkpoint',
+      internal_chat_message_metadata_passthrough: {checkpoint_marker: 'preserve-exactly'},
+    };
+    const body = fixture();
+    body.input.unshift(checkpoint);
+    const before = structuredClone(body);
+    const {result, reports} = await run(body);
+    assert.ok(result, 'A native checkpoint must not disable filtering of later reasoning');
+    assert.strictEqual(result.input[0], checkpoint);
+    assert.deepEqual(result.input[0], before.input[0]);
+    assert.equal(result.input.some(item => item.type === 'reasoning'), false);
+    assert.equal(result.input.some(item => item.type === 'web_search_call'), false);
+    assert.deepEqual(result.input.filter(item => item.call_id).map(item => item.call_id),
+      before.input.filter(item => item.call_id).map(item => item.call_id));
+    assert.deepEqual(body, before);
+    assert.ok(reports.some(({code}) => code === 'native-history-filtered-with-compaction'));
+  }
+});
+
+test('a native checkpoint without incompatible history passes through unchanged', async () => {
+  const body = {
+    model: 'gpt-example',
+    stream: true,
+    input: [
+      {type: 'compaction', id: 'cmp_native', encrypted_content: 'synthetic-native-checkpoint'},
+      {type: 'message', role: 'user', content: [{type: 'input_text', text: 'Continue.'}]},
+    ],
+  };
+  const before = structuredClone(body);
+  assert.equal((await run(body)).result, undefined);
+  assert.deepEqual(body, before);
 });
