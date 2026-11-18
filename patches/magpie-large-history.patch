@@ -1,0 +1,140 @@
+--- a/internal/plugin/host.go
++++ b/internal/plugin/host.go
+@@ -176,9 +176,9 @@
+ 	// sides count one number.
+ 	frameOverhead = 2048
+ 	rpcReserve    = 64
+-	// maxWireLine bounds one line the child writes: a frame's base64 is well
+-	// under it, and so is any RPC result, so a child that never ends a line
+-	// fails the host rather than making it allocate without bound.
++	// maxWireLine is the normal control-line allowance. Gateway results
++	// also carry their already-bounded input body and reserve its room
++	// separately. A child that never ends a line still fails at its bound.
+ 	maxWireLine = 32 << 20
+ 	// streamWait is how long a fetch waits for a stream's window to come
+ 	// free when the budget's are all held, while its request lives. Past
+@@ -483,6 +483,10 @@
+ 	cancel context.CancelFunc
+ 	// maxLine overrides maxWireLine for this host; tests lower it.
+ 	maxLine int
++	// A gateway result includes the whole request it accepted. Its body is
++	// already bounded by the gateway; retain room for the largest one this
++	// host has received plus the normal RPC allowance.
++	gatewayLine atomic.Int64
+ 	// failOnce makes the one failure that ends the host run once, whatever
+ 	// noticed it (the stdout reader or the stdin writer).
+ 	failOnce sync.Once
+@@ -580,7 +584,16 @@
+ 	if h.maxLine > 0 {
+ 		return h.maxLine
+ 	}
+-	return maxWireLine
++	return max(maxWireLine, int(h.gatewayLine.Load()))
++}
++
++func (h *host) allowGatewayLine(bodyBytes int) {
++	room := int64(bodyBytes) + int64(maxWireLine)
++	for previous := h.gatewayLine.Load(); previous < room; previous = h.gatewayLine.Load() {
++		if h.gatewayLine.CompareAndSwap(previous, room) {
++			return
++		}
++	}
+ }
+ 
+ // headCost is a head's header cost: the UTF-8 bytes of every name and value,
+@@ -1351,7 +1364,7 @@
+ func (h *host) read(out io.Reader) {
+ 	r := bufio.NewReaderSize(out, 1<<20)
+ 	for {
+-		line, err := readLine(r, h.lineLimit())
++		line, err := readLineBound(r, h.lineLimit)
+ 		if len(line) > 0 {
+ 			if m, ok := chunkFrame(line); ok {
+ 				h.dispatch(m)
+@@ -1418,10 +1431,16 @@
+ // never ends a line cannot make the host allocate without bound. It is
+ // errLineTooLong once max is passed.
+ func readLine(r *bufio.Reader, max int) ([]byte, error) {
++	return readLineBound(r, func() int { return max })
++}
++
++// The stdout reader may already be waiting when a gateway request reserves
++// its reply room. Read the current bound as each piece arrives.
++func readLineBound(r *bufio.Reader, bound func() int) ([]byte, error) {
+ 	var line []byte
+ 	for {
+ 		part, err := r.ReadSlice('\n')
+-		if len(line)+len(part) > max {
++		if len(line)+len(part) > bound() {
+ 			return nil, errLineTooLong
+ 		}
+ 		line = append(line, part...)
+--- a/internal/plugin/gateway.go
++++ b/internal/plugin/gateway.go
+@@ -264,6 +264,7 @@
+ 		Token string          `json:"token"`
+ 		Body  json.RawMessage `json:"body"`
+ 	}
++	h.allowGatewayLine(len(body))
+ 	err = h.call(total, "gatewayRequest", map[string]any{"operation": "begin", "body": json.RawMessage(body), "context": info}, &out)
+ 	if err != nil || out.ID == "" || out.Token == "" || len(out.Body) == 0 || out.Body[0] != '{' || !json.Valid(out.Body) {
+ 		return nil
+--- /dev/null
++++ b/internal/plugin/gateway_large_history_test.go
+@@ -0,0 +1,56 @@
++package plugin
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++)
++
++func TestGatewayHookLargeHistoryKeepsImagesAndFiltersReasoning(t *testing.T) {
++	sandbox(t)
++	gatewayFixture(t, `export async function onRequest(body) {
++  return {...body, input: body.input.filter(item => item.type !== "reasoning")};
++}`)
++	image := "data:image/png;base64," + strings.Repeat("A", 36<<20)
++	body, err := json.Marshal(map[string]any{
++		"model":  "gpt-example",
++		"stream": true,
++		"input": []any{
++			map[string]any{"type": "message", "role": "user", "content": []any{
++				map[string]any{"type": "input_text", "text": "Keep this image and conversation."},
++				map[string]any{"type": "input_image", "image_url": image},
++			}},
++			map[string]any{"type": "reasoning", "id": "rs_foreign", "encrypted_content": "synthetic-foreign-seal"},
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	run := GatewayBegin(t.Context(), body, GatewayContext{
++		Protocol: "responses", Path: "/backend-api/codex/responses", Model: "gpt-example", Agent: "codex",
++	})
++	if run == nil {
++		t.Fatal("large history lost its accepted hook result; original foreign reasoning would be forwarded")
++	}
++	defer run.Close()
++	var result struct {
++		Input []struct {
++			Type    string `json:"type"`
++			Content []struct {
++				Image string `json:"image_url"`
++				Text  string `json:"text"`
++			} `json:"content"`
++		} `json:"input"`
++	}
++	if err := json.Unmarshal(run.Body, &result); err != nil {
++		t.Fatal(err)
++	}
++	if len(result.Input) != 1 || result.Input[0].Type != "message" {
++		t.Fatal("foreign reasoning was not removed")
++	}
++	if len(result.Input[0].Content) != 2 ||
++		result.Input[0].Content[0].Text != "Keep this image and conversation." ||
++		result.Input[0].Content[1].Image != image {
++		t.Fatal("large image or readable message changed")
++	}
++}

@@ -92,6 +92,10 @@ magpie plugin options github:Singrun/magpie-codex-native-history '{"gatewayTimeo
 
 专用 `/responses/compact` 调用和 Magpie 内部请求不在本钩子范围内。按 Magpie 的契约，钩子失败或超时也会回滚，本来的请求可能继续送往上游。
 
+**大图片历史还受 Magpie 宿主传输限制。** Magpie 0.1.4402 的 Go/Bun 宿主默认最多接收 32 MiB 的单行结果，但请求钩子返回的是整份请求。历史经过过滤后仍超过这一上限时，宿主会拒绝结果，未过滤的原请求可能继续送往原生服务。这与过滤规则是否正确是两个独立环节，插件本身无法扩大宿主上限。
+
+仓库提供基于 Magpie **v0.1.4402** 的[宿主补丁](https://github.com/Singrun/magpie-codex-native-history/blob/main/patches/magpie-large-history.patch)。它按网关已经接受的请求大小，为宿主结果预留“原请求大小＋默认 RPC 余量”的空间；边界仍然存在，普通超长行保护也保留。36 MiB 合成图片的真实 Go/Bun 回归在旧代码上失败、补丁后通过；约 38 MB 的真实历史也已在隔离网关中通过原生回放，图片、可读消息和工具结果保留。补丁需要应用到 Magpie 源码并重新编译、重启，安装本插件不会自动修改官方 App。启用到正式 App 前应保留可恢复的备份。
+
 诊断使用 Magpie 宿主允许的固定代码：
 
 - `ready`：钩子完成修改；它表示过滤已执行，上游是否成功需看请求结果。
