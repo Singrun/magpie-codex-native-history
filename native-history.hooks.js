@@ -21,13 +21,32 @@ function nativeRequest(body, ctx) {
     (!model.includes('/') || model.startsWith('codex/'));
 }
 
+function hasPlainOutputReplay(item) {
+  if (!item?.encrypted_content || item.encrypted_function_args) return false;
+  const text = value => typeof value === 'string' && value.trim().length > 0;
+  // output.encrypted_content can accompany the complete plaintext output.
+  // A sealed task or a heading beside encrypted content is not such a copy.
+  if (item.type === 'message' && item.role === 'assistant') {
+    const parts = item.content;
+    return text(parts) || Array.isArray(parts) && parts.length > 0 &&
+      parts.every(part => ['input_text', 'output_text', 'text'].includes(part?.type) &&
+        typeof part.text === 'string') &&
+      parts.some(part => text(part.text));
+  }
+  if (!text(item.call_id)) return false;
+  if (item.type === 'function_call') return text(item.name) && text(item.arguments);
+  if (item.type === 'custom_tool_call') return text(item.name) && text(item.input);
+  return ['function_call_output', 'custom_tool_call_output'].includes(item.type) &&
+    text(item.output);
+}
+
 function requiresContextPassthrough(item) {
   if (!item || typeof item !== 'object') return false;
   // A checkpoint can be readable by the native upstream. Keep it untouched,
   // but still filter incompatible items accumulated after the checkpoint.
-  if (COMPACTION_ITEMS.has(item.type)) return false;
+  if (COMPACTION_ITEMS.has(item.type) || item.type === 'reasoning') return false;
   if (item.type === 'item_reference') return true;
-  if (item.type !== 'reasoning' && item.encrypted_content) return true;
+  if (item.encrypted_content && !hasPlainOutputReplay(item)) return true;
   return Array.isArray(item.content) &&
     item.content.some(part => part?.type === 'encrypted_content');
 }
@@ -72,11 +91,14 @@ export async function onRequest(body, ctx) {
       changed = true;
       continue;
     }
-    if (item && typeof item === 'object' && item.id &&
-        (PORTABLE_ITEMS.has(item.type) ||
-         (!item.type && typeof item.role === 'string' && item.content !== undefined))) {
+    const stripReplay = hasPlainOutputReplay(item);
+    const stripID = item && typeof item === 'object' && item.id &&
+      (PORTABLE_ITEMS.has(item.type) ||
+       (!item.type && typeof item.role === 'string' && item.content !== undefined));
+    if (stripReplay || stripID) {
       const portable = {...item};
-      delete portable.id;
+      if (stripReplay) delete portable.encrypted_content;
+      if (stripID) delete portable.id;
       input.push(portable);
       changed = true;
     } else {

@@ -297,3 +297,81 @@ test('filtering is idempotent and never removes required ids of unknown server t
   assert.strictEqual(result.input.at(-1), serverCall);
   assert.equal((await run(result)).result, undefined);
 });
+
+test('an assistant output replay seal does not bypass cleanup of subsequent foreign reasoning', async () => {
+  const body = fixture();
+  const answer = {
+    type: 'message', role: 'assistant', id: 'msg_native_replay',
+    status: 'completed', phase: 'final_answer', encrypted_content: 'synthetic-output-replay-seal',
+    content: [{type: 'output_text', text: 'The completed work remains available.',
+      annotations: [], logprobs: []}],
+    internal_chat_message_metadata_passthrough: {turn_id: 'synthetic-turn', content_item_kinds: ['text']},
+  };
+  body.input.splice(1, 0, answer);
+  const before = structuredClone(body);
+  const {result, reports} = await run(body);
+  assert.ok(result, 'A complete plaintext answer must not disable reasoning cleanup');
+  assert.equal(result.input.some(item => item.type === 'reasoning'), false);
+  const expected = {...answer};
+  delete expected.encrypted_content;
+  delete expected.id;
+  assert.deepEqual(result.input.find(item => item.phase === 'final_answer' &&
+    item.content[0].text === answer.content[0].text), expected);
+  assert.deepEqual(body, before);
+  assert.deepEqual(reports, [{code: 'ready', bytes: 0}]);
+});
+
+test('known tool calls and text results with complete plaintext lose only their replay seals', async () => {
+  const items = [
+    {type: 'function_call', id: 'fc_replay', encrypted_content: 'synthetic-seal',
+      call_id: 'function_pair', name: 'read_file', arguments: '{"path":"a.txt"}'},
+    {type: 'function_call_output', id: 'fco_replay', encrypted_content: 'synthetic-seal',
+      call_id: 'function_pair', output: 'synthetic file contents'},
+    {type: 'custom_tool_call', id: 'ctc_replay', encrypted_content: 'synthetic-seal',
+      call_id: 'custom_pair', name: 'patch', input: 'synthetic patch'},
+    {type: 'custom_tool_call_output', id: 'ctco_replay', encrypted_content: 'synthetic-seal',
+      call_id: 'custom_pair', output: 'synthetic patch result'},
+  ];
+  const body = {...fixture(), input: [
+    {type: 'reasoning', encrypted_content: 'synthetic-foreign-reasoning'}, ...items,
+  ]};
+  const before = structuredClone(body);
+  const {result} = await run(body);
+  assert.ok(result);
+  assert.deepEqual(result.input, items.map(({id, encrypted_content, ...item}) => item));
+  assert.deepEqual(body, before);
+});
+
+test('empty, partially sealed, or unknown payloads still preserve the whole request', async () => {
+  for (const item of [
+    {type: 'message', role: 'assistant', encrypted_content: 'synthetic-seal', content: []},
+    {type: 'message', role: 'assistant', encrypted_content: 'synthetic-seal',
+      content: [{type: 'output_text', text: ' '}]},
+    {type: 'message', role: 'assistant', encrypted_content: 'synthetic-seal',
+      content: [{type: 'output_text', text: 'Visible heading'},
+        {type: 'encrypted_content', encrypted_content: 'synthetic-sealed-task'}]},
+    {type: 'agent_message', encrypted_content: 'synthetic-seal',
+      content: [{type: 'input_text', text: 'Task heading'}]},
+    {type: 'function_call', encrypted_content: 'synthetic-seal', encrypted_function_args: 'synthetic-hidden-args',
+      call_id: 'call_sealed', name: 'spawn_agent', arguments: '{}'},
+    {type: 'custom_tool_call', encrypted_content: 'synthetic-seal',
+      call_id: 'call_empty', name: 'patch', input: ''},
+    {type: 'unknown_tool', encrypted_content: 'synthetic-seal', output: 'Visible fragment'},
+  ]) {
+    const body = fixture();
+    body.input.push(item);
+    const before = structuredClone(body);
+    const {result, reports} = await run(body);
+    assert.equal(result, undefined);
+    assert.deepEqual(body, before);
+    assert.deepEqual(reports, [{code: 'unavailable', bytes: 0}]);
+  }
+});
+
+test('an encrypted part inside discarded reasoning cannot disable the history filter', async () => {
+  const body = fixture();
+  body.input[1].content = [{type: 'encrypted_content', encrypted_content: 'synthetic-reasoning-part'}];
+  const {result} = await run(body);
+  assert.ok(result);
+  assert.equal(result.input.some(item => item.type === 'reasoning'), false);
+});

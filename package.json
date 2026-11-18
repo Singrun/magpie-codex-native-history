@@ -1,6 +1,6 @@
 {
   "name": "magpie-codex-native-history",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "A Magpie request hook that preserves readable Codex history when switching back to the native ChatGPT route.",
   "type": "module",
   "license": "MIT",
